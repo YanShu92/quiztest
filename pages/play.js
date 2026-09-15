@@ -2,19 +2,24 @@ import { useEffect, useState, useRef } from 'react';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
 import { db } from '@/lib/firebase';
-import { ref, onValue, set } from 'firebase/database';
+import { ref, onValue, runTransaction } from 'firebase/database';
+
+import { useServerOffset } from '@/lib/useServerOffset';
+import Scoreboard from '@/components/Scoreboard';
 
 const TIMER_DURATION = 15;
 
 const TEAM_COLORS = [
-  { color: '#ef4444', glow: 'rgba(239,68,68,0.4)', bg: 'rgba(239,68,68,0.12)', border: 'rgba(239,68,68,0.5)', gradient: 'linear-gradient(135deg, #ef4444, #b91c1c)' },
-  { color: '#3b82f6', glow: 'rgba(59,130,246,0.4)', bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.5)', gradient: 'linear-gradient(135deg, #3b82f6, #1d4ed8)' },
-  { color: '#10b981', glow: 'rgba(16,185,129,0.4)', bg: 'rgba(16,185,129,0.12)', border: 'rgba(16,185,129,0.5)', gradient: 'linear-gradient(135deg, #10b981, #065f46)' },
-  { color: '#a855f7', glow: 'rgba(168,85,247,0.4)', bg: 'rgba(168,85,247,0.12)', border: 'rgba(168,85,247,0.5)', gradient: 'linear-gradient(135deg, #a855f7, #6b21a8)' },
+  { color: '#ef4444', glow: 'rgba(239,68,68,0.4)', bg: 'rgba(239,68,68,0.08)', border: 'rgba(239,68,68,0.4)', gradient: 'linear-gradient(135deg, #ef4444, #b91c1c)' },
+  { color: '#2563eb', glow: 'rgba(37,99,235,0.4)', bg: 'rgba(37,99,235,0.08)', border: 'rgba(37,99,235,0.4)', gradient: 'linear-gradient(135deg, #2563eb, #1e40af)' },
+  { color: '#059669', glow: 'rgba(5,150,105,0.4)', bg: 'rgba(5,150,105,0.08)', border: 'rgba(5,150,105,0.4)', gradient: 'linear-gradient(135deg, #059669, #065f46)' },
+  { color: '#7c3aed', glow: 'rgba(124,58,237,0.4)', bg: 'rgba(124,58,237,0.08)', border: 'rgba(124,58,237,0.4)', gradient: 'linear-gradient(135deg, #7c3aed, #5b21b6)' },
 ];
 
 export default function PlayPage() {
   const router = useRouter();
+  const offset = useServerOffset();
+  const [error, setError] = useState('');
   const [gameState, setGameState] = useState(null);
   const [mySlot, setMySlot] = useState(null);
   const [myName, setMyName] = useState('');
@@ -23,7 +28,6 @@ export default function PlayPage() {
   const [myAnswer, setMyAnswer] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const timerRef = useRef(null);
-  const prevStatusRef = useRef(null);
 
   useEffect(() => {
     const slot = localStorage.getItem('quizSlot');
@@ -47,50 +51,58 @@ export default function PlayPage() {
     return () => unsub();
   }, [router]);
 
-  // Timer
+  // Timer — only for display purposes
   useEffect(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
 
-    if (gameState?.status === 'question' && gameState?.currentQuestion?.startTime) {
+    if (offset !== null && gameState?.status === 'question' && gameState?.currentQuestion?.startTime) {
       const startTime = gameState.currentQuestion.startTime;
       const tick = () => {
-        const elapsed = (Date.now() - startTime) / 1000;
+        const elapsed = (Date.now() + offset - startTime) / 1000;
         setTimeLeft(Math.max(0, TIMER_DURATION - elapsed));
       };
       tick();
       timerRef.current = setInterval(tick, 200);
     }
 
-    // Reset answer when new question starts
-    if (gameState?.status === 'question' && prevStatusRef.current !== 'question') {
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [gameState?.status, gameState?.currentQuestion?.startTime, offset]);
+
+  // Reset my answer state when a new question starts (keyed on startTime)
+  const questionStartTime = gameState?.currentQuestion?.startTime;
+  useEffect(() => {
+    if (questionStartTime) {
+      setError('');
       setMyAnswer(null);
       setSubmitting(false);
     }
-    prevStatusRef.current = gameState?.status;
-
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [gameState?.status, gameState?.currentQuestion?.startTime]);
+  }, [questionStartTime]);
 
   const handleAnswer = async (letter) => {
-    if (myAnswer || submitting || timeLeft <= 0 || !mySlot) return;
+    if (offset === null || gameState?.status !== 'question' || mySubmittedAnswer || myAnswer || submitting || isActuallyTimedOut || !mySlot) return;
 
     const startTime = gameState?.currentQuestion?.startTime;
-    const responseTime = startTime ? (Date.now() - startTime) / 1000 : 0;
+    const responseTime = startTime ? (Date.now() + offset - startTime) / 1000 : 0;
 
     setMyAnswer(letter);
     setSubmitting(true);
 
     try {
-      await set(ref(db, `quiz/answers/${mySlot}`), {
-        answer: letter,
-        timestamp: Date.now(),
-        responseTime: Math.round(responseTime * 10) / 10,
-      });
+      const result = await runTransaction(ref(db, 'quiz'), data => {
+        if (!data || data.status !== 'question' || data.currentQuestion?.startTime !== startTime ||
+            data.answers?.[mySlot] || Date.now() + offset >= startTime + TIMER_DURATION * 1000) return;
+        return { ...data, answers: { ...data.answers, [mySlot]: {
+          answer: letter, timestamp: Date.now() + offset,
+          responseTime: Math.max(0, Math.round(responseTime * 10) / 10),
+        } } };
+      }, { applyLocally: false });
+      if (!result.committed) setMyAnswer(null);
     } catch (err) {
-      console.error(err);
+      setMyAnswer(null);
+      setError('Chưa gửi được đáp án. Hãy thử lại khi còn thời gian.');
     }
     setSubmitting(false);
   };
@@ -104,7 +116,7 @@ export default function PlayPage() {
 
   if (!gameState || !mySlot) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg-primary)' }}>
         <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
           <div style={{ fontSize: '3rem', marginBottom: '16px' }}>⚡</div>
           <p>Đang kết nối...</p>
@@ -120,6 +132,10 @@ export default function PlayPage() {
   const answers = gameState.answers || {};
   const mySubmittedAnswer = answers[mySlot];
   const cq = gameState.currentQuestion;
+
+  // Derived timeout — computed directly from Firebase startTime, not from timeLeft state
+  const questionElapsed = questionStartTime ? (Date.now() + offset - questionStartTime) / 1000 : 0;
+  const isActuallyTimedOut = offset !== null && status === 'question' && questionElapsed >= TIMER_DURATION;
 
   // Reveal info
   const history = gameState.history || {};
@@ -142,12 +158,12 @@ export default function PlayPage() {
         <title>Quiz Battle – {myName}</title>
         <meta name="description" content="Màn hình trả lời cho đội tham gia quiz" />
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-        <meta name="theme-color" content="#07090f" />
+        <meta name="theme-color" content="#eff6ff" />
       </Head>
       <div className="grid-bg" />
       <div className="page team-play-page">
         {/* Header */}
-        <div className="team-header" style={{ borderBottomColor: `${tc.color}33` }}>
+        <div className="team-header" style={{ borderBottomColor: `${tc.color}25` }}>
           <div className="team-name-display" style={{ color: tc.color }}>
             {myTeamData?.emoji || '⚡'} {myName}
           </div>
@@ -158,15 +174,26 @@ export default function PlayPage() {
             </div>
             <button
               onClick={handleLogout}
-              style={{ background: 'none', border: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-secondary)', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.75rem' }}
+              style={{
+                background: 'var(--bg-primary)',
+                border: '1px solid var(--border-color)',
+                color: 'var(--text-secondary)',
+                padding: '6px 12px',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                fontSize: '0.75rem',
+                fontWeight: 600,
+              }}
             >
               Thoát
             </button>
           </div>
         </div>
 
+        <Scoreboard teams={gameState.teams || {}} />
         {/* Body */}
         <div className="team-play-body">
+          {error && <p role="alert">{error}</p>}
           {/* LOBBY */}
           {status === 'lobby' && (
             <div className="waiting-state">
@@ -193,10 +220,11 @@ export default function PlayPage() {
                 ⏱ {Math.ceil(timeLeft)}s
               </div>
 
-              {!mySubmittedAnswer && timeLeft > 0 && (
+              {/* Not yet answered, not timed out */}
+              {!mySubmittedAnswer && !isActuallyTimedOut && (
                 <>
                   <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', textAlign: 'center' }}>
-                    Câu {cq.number} — Chọn đáp án của bạn
+                    Câu {cq.number} — {cq.questionData.question}
                   </p>
                   <div className="answers-grid">
                     {ANSWER_OPTIONS.map(({ letter, cls }) => (
@@ -204,7 +232,7 @@ export default function PlayPage() {
                         key={letter}
                         className={`answer-btn ${cls}`}
                         onClick={() => handleAnswer(letter)}
-                        disabled={!!myAnswer || submitting}
+                        disabled={offset === null || !!myAnswer || submitting}
                       >
                         <div className="answer-btn-letter">{letter}</div>
                         <div className="answer-btn-text">{cq.questionData.options[letter]}</div>
@@ -214,6 +242,7 @@ export default function PlayPage() {
                 </>
               )}
 
+              {/* Already submitted */}
               {mySubmittedAnswer && (
                 <div className="answered-state">
                   <div className="answered-icon">✅</div>
@@ -230,11 +259,12 @@ export default function PlayPage() {
                 </div>
               )}
 
-              {!mySubmittedAnswer && timeLeft <= 0 && (
+              {/* Timed out without answering */}
+              {!mySubmittedAnswer && isActuallyTimedOut && (
                 <div className="answered-state">
                   <div className="answered-icon">⏰</div>
                   <h2 style={{ color: 'var(--text-secondary)' }}>Hết giờ!</h2>
-                  <p style={{ color: 'rgba(255,255,255,0.3)' }}>Bạn không kịp trả lời câu này</p>
+                  <p style={{ color: 'var(--text-secondary)', opacity: 0.6 }}>Bạn không kịp trả lời câu này</p>
                 </div>
               )}
             </>
@@ -248,7 +278,12 @@ export default function PlayPage() {
                   <div className="result-icon">
                     {myRevealResult.correct ? '🎉' : myRevealResult.answer ? '❌' : '⏰'}
                   </div>
-                  <div className="result-label" style={{ color: myRevealResult.correct ? '#34d399' : myRevealResult.answer ? '#f87171' : 'var(--text-secondary)' }}>
+                  <div
+                    className="result-label"
+                    style={{
+                      color: myRevealResult.correct ? '#059669' : myRevealResult.answer ? '#dc2626' : 'var(--text-secondary)',
+                    }}
+                  >
                     {myRevealResult.correct ? 'Chính xác!' : myRevealResult.answer ? 'Sai rồi!' : 'Hết giờ!'}
                   </div>
                   <div className={`result-points ${(myRevealResult.points || 0) === 0 ? 'zero' : ''}`}>
@@ -268,7 +303,16 @@ export default function PlayPage() {
               </div>
 
               {/* Rank this round */}
-              <div style={{ width: '100%', background: 'var(--bg-card)', borderRadius: '12px', padding: '16px', border: '1px solid var(--border-color)' }}>
+              <div
+                style={{
+                  width: '100%',
+                  background: 'var(--bg-card)',
+                  borderRadius: '12px',
+                  padding: '16px',
+                  border: '1px solid var(--border-color)',
+                  boxShadow: '0 2px 8px rgba(37,99,235,0.06)',
+                }}
+              >
                 <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '12px' }}>
                   Thứ hạng vòng này
                 </p>
@@ -289,11 +333,12 @@ export default function PlayPage() {
                         border: isMe ? `1px solid ${tc.border}` : '1px solid transparent',
                       }}
                     >
-                      <span style={{ fontFamily: 'Exo 2, sans-serif', fontWeight: 800, width: '24px', color: ['#fbbf24','#9ca3af','#cd7f32','var(--text-secondary)'][idx] || 'var(--text-secondary)' }}>
+                      <span style={{ fontFamily: 'Exo 2, sans-serif', fontWeight: 800, width: '24px', color: ['#fbbf24','#94a3b8','#cd7f32','var(--text-secondary)'][idx] || 'var(--text-secondary)' }}>
                         {idx + 1}
                       </span>
                       <span style={{ color: tc2.color, fontWeight: 700, flex: 1 }}>{r.name}</span>
-                      <span style={{ color: r.correct ? '#34d399' : '#f87171', fontFamily: 'Exo 2, sans-serif', fontWeight: 700, fontSize: '0.9rem' }}>
+                      <span>{r.answer || 'Không trả lời'} · {r.responseTime != null ? `${r.responseTime.toFixed(1)}s` : '—'}</span>
+                      <span style={{ color: r.correct ? '#059669' : '#dc2626', fontFamily: 'Exo 2, sans-serif', fontWeight: 700, fontSize: '0.9rem' }}>
                         {r.points > 0 ? `+${r.points}` : '0'}
                       </span>
                     </div>
@@ -312,7 +357,17 @@ export default function PlayPage() {
             <div className="waiting-state" style={{ gap: '20px' }}>
               <div className="waiting-icon">🏆</div>
               <h2 style={{ color: tc.color, fontSize: '2rem' }}>Game Kết Thúc!</h2>
-              <div style={{ background: 'var(--bg-card)', borderRadius: '12px', padding: '24px', border: '1px solid var(--border-color)', width: '100%', maxWidth: '320px' }}>
+              <div
+                style={{
+                  background: 'var(--bg-card)',
+                  borderRadius: '12px',
+                  padding: '24px',
+                  border: '1px solid var(--border-color)',
+                  width: '100%',
+                  maxWidth: '320px',
+                  boxShadow: '0 4px 16px rgba(37,99,235,0.08)',
+                }}
+              >
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginBottom: '12px', textAlign: 'center', textTransform: 'uppercase', letterSpacing: '1px' }}>
                   Kết quả của bạn
                 </p>

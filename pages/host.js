@@ -1,8 +1,11 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import Head from 'next/head';
 import { db } from '@/lib/firebase';
-import { ref, onValue, set, update, remove } from 'firebase/database';
+import { ref, onValue, set, update, runTransaction, serverTimestamp } from 'firebase/database';
 import questions from '@/lib/questions';
+
+import { useServerOffset } from '@/lib/useServerOffset';
+import Scoreboard from '@/components/Scoreboard';
 
 const TIMER_DURATION = 15;
 
@@ -43,6 +46,9 @@ function Confetti() {
 }
 
 export default function HostPage() {
+  const offset = useServerOffset();
+  const [error, setError] = useState('');
+  const [selecting, setSelecting] = useState(false);
   const [gameState, setGameState] = useState(null);
   const [timeLeft, setTimeLeft] = useState(TIMER_DURATION);
   const [revealTriggered, setRevealTriggered] = useState(false);
@@ -68,20 +74,21 @@ export default function HostPage() {
     revealRef.current = false;
     setRevealTriggered(false);
 
-    if (gameState?.status === 'question' && gameState?.currentQuestion?.startTime) {
+    if (offset !== null && gameState?.status === 'question' && gameState?.currentQuestion?.startTime) {
       const startTime = gameState.currentQuestion.startTime;
 
       const tick = () => {
-        const elapsed = (Date.now() - startTime) / 1000;
+        const elapsed = (Date.now() + offset - startTime) / 1000;
         const remaining = Math.max(0, TIMER_DURATION - elapsed);
         setTimeLeft(remaining);
 
         if (remaining <= 0 && !revealRef.current) {
           revealRef.current = true;
           setRevealTriggered(true);
-          clearInterval(timerRef.current);
-          timerRef.current = null;
-          triggerReveal();
+          triggerReveal(startTime).catch(() => {
+            setError('Không thể lưu kết quả. Đang thử lại…');
+            revealRef.current = false;
+          });
         }
       };
 
@@ -94,87 +101,86 @@ export default function HostPage() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [gameState?.status, gameState?.currentQuestion?.startTime]);
+  }, [gameState?.status, gameState?.currentQuestion?.startTime, offset]);
 
-  const triggerReveal = useCallback(async () => {
-    const snap = await new Promise(resolve => {
-      onValue(ref(db, 'quiz'), resolve, { onlyOnce: true });
-    });
-    const data = snap.val();
-    if (!data || data.status !== 'question') return;
+  const triggerReveal = useCallback(async (startTime) => {
+    await runTransaction(ref(db, 'quiz'), (data) => {
+      if (!data || data.status !== 'question' || data.currentQuestion?.startTime !== startTime) return;
+      const cq = data.currentQuestion;
+      const answers = data.answers || {};
+      const teams = Object.fromEntries(Object.entries(data.teams || {}).map(([key, team]) => [key, team ? { ...team } : null]));
+      const correctAnswer = cq.questionData.answer;
 
-    const cq = data.currentQuestion;
-    const answers = data.answers || {};
-    const teams = data.teams || {};
-    const correctAnswer = cq.questionData.answer;
+      // Build results
+      const teamResults = Object.entries(teams)
+        .filter(([, t]) => t !== null)
+        .map(([slotKey, team]) => {
+          const ans = answers[slotKey];
+          const isCorrect = !!ans && ans.answer === correctAnswer;
+          return {
+            slotKey,
+            name: team.name,
+            slot: team.slot,
+            answer: ans ? ans.answer : null,
+            responseTime: ans ? ans.responseTime : null,
+            correct: isCorrect,
+          };
+        })
+        .sort((a, b) => {
+          if (a.correct && !b.correct) return -1;
+          if (!a.correct && b.correct) return 1;
+          if (a.correct && b.correct) return (a.responseTime ?? 99) - (b.responseTime ?? 99);
+          return 0;
+        });
 
-    // Build results
-    const teamResults = Object.entries(teams)
-      .filter(([, t]) => t !== null)
-      .map(([slotKey, team]) => {
-        const ans = answers[slotKey];
-        const isCorrect = ans && ans.answer === correctAnswer;
-        return {
-          slotKey,
-          name: team.name,
-          slot: team.slot,
-          answer: ans ? ans.answer : null,
-          responseTime: ans ? ans.responseTime : null,
-          correct: isCorrect,
-        };
-      })
-      .sort((a, b) => {
-        if (a.correct && !b.correct) return -1;
-        if (!a.correct && b.correct) return 1;
-        if (a.correct && b.correct) return (a.responseTime || 99) - (b.responseTime || 99);
-        return 0;
+      // Assign points
+      let correctRank = 0;
+      const pointMap = [10, 9, 8, 7];
+
+      teamResults.forEach(r => {
+        let pts = 0;
+        if (r.correct) {
+          pts = pointMap[correctRank] || 7;
+          correctRank++;
+        }
+        r.points = pts;
+
+        // Update team score
+        const currentScore = teams[r.slotKey]?.score || 0;
+        teams[r.slotKey].score = currentScore + pts;
       });
 
-    // Assign points
-    let correctRank = 0;
-    const pointMap = [10, 9, 8, 7];
-    const updates = {};
+      // Save question history
+      const historyIndex = (data.history ? Object.keys(data.history).length : 0);
+      const result = {
+        number: cq.number,
+        question: cq.questionData.question,
+        correctAnswer,
+        results: teamResults,
+      };
 
-    teamResults.forEach(r => {
-      let pts = 0;
-      if (r.correct) {
-        pts = pointMap[correctRank] || 7;
-        correctRank++;
-      }
-      teamResults.find(x => x.slotKey === r.slotKey).points = pts;
-
-      // Update team score
-      const currentScore = teams[r.slotKey]?.score || 0;
-      updates[`quiz/teams/${r.slotKey}/score`] = currentScore + pts;
-    });
-
-    // Save question history
-    const historyIndex = (data.history ? Object.keys(data.history).length : 0);
-    updates[`quiz/history/${historyIndex}`] = {
-      number: cq.number,
-      question: cq.questionData.question,
-      correctAnswer,
-      results: teamResults,
-    };
-
-    // Update used questions
-    updates[`quiz/usedQuestions/${cq.number}`] = true;
-    updates['quiz/status'] = 'reveal';
-
-    await update(ref(db), updates);
+      return { ...data, teams, history: { ...data.history, [historyIndex]: result },
+        usedQuestions: { ...data.usedQuestions, [cq.number]: true }, status: 'reveal' };
+    }, { applyLocally: false });
+    setError('');
   }, []);
 
   const handleSelectQuestion = async (qNumber) => {
-    const qData = questions[qNumber - 1];
-    await update(ref(db, 'quiz'), {
-      status: 'question',
-      currentQuestion: {
-        number: qNumber,
-        questionData: qData,
-        startTime: Date.now(),
-      },
-      answers: { slot1: null, slot2: null, slot3: null, slot4: null },
-    });
+    if (selecting || gameState?.status !== 'picking' || gameState?.usedQuestions?.[qNumber]) return;
+    setSelecting(true);
+    setError('');
+    try {
+      await runTransaction(ref(db, 'quiz'), data => {
+        if (!data || data.status !== 'picking' || data.usedQuestions?.[qNumber]) return;
+        return { ...data, status: 'question', currentQuestion: {
+          number: qNumber, questionData: questions[qNumber - 1], startTime: serverTimestamp(),
+        }, answers: null };
+      }, { applyLocally: false });
+    } catch {
+      setError('Không thể mở câu hỏi. Vui lòng thử lại.');
+    } finally {
+      setSelecting(false);
+    }
   };
 
   const handleNextQuestion = async () => {
@@ -278,6 +284,8 @@ export default function HostPage() {
           </button>
         </div>
 
+        {error && <p role="alert">{error}</p>}
+        <Scoreboard teams={teams} />
         {/* LOBBY */}
         {status === 'lobby' && (
           <div className="waiting-screen">
@@ -333,13 +341,16 @@ export default function HostPage() {
               {Array.from({ length: 10 }, (_, i) => i + 1).map(n => {
                 const used = !!usedQuestions[n];
                 return (
-                  <div
+                  <button
+                    type="button"
+                    disabled={used || selecting}
+                    aria-label={`Câu ${n}${used ? ": đã trả lời" : ""}`}
                     key={n}
                     className={`q-box ${used ? 'used' : ''}`}
                     onClick={() => !used && handleSelectQuestion(n)}
                   >
-                    {used ? '✓' : n}
-                  </div>
+                    {n}
+                  </button>
                 );
               })}
             </div>
@@ -459,7 +470,7 @@ export default function HostPage() {
                           fontWeight: 700,
                           fontFamily: 'Exo 2, sans-serif',
                         }}>
-                          {r.answer || '—'}
+                          {r.answer || 'Không trả lời'}
                         </span>
                       </td>
                       <td style={{ color: 'var(--text-secondary)', fontFamily: 'Exo 2, sans-serif' }}>
