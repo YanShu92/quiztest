@@ -1409,3 +1409,34 @@ body {
 .q-box:disabled { cursor: not-allowed; }
 .q-box:focus-visible, .answer-btn:focus-visible { outline: 3px solid #2563eb; outline-offset: 4px; }
 @media (max-width: 600px) { .host-header { flex-wrap: wrap; gap: 12px; } .results-table th, .results-table td { padding: 8px 4px; font-size: .8rem; } }
+.host-page { height: 100dvh; min-height: 0; padding: 16px; }
+.host-header { flex-shrink: 0; margin-bottom: 12px; padding: 12px 18px; }
+.host-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 16px; flex: 1; min-height: 0; }
+.host-sidebar { overflow: auto; }
+.host-sidebar .live-scoreboard { margin: 0; width: 100%; padding: 12px; }
+.host-sidebar .live-scoreboard-list { grid-template-columns: 1fr; }
+.host-sidebar .live-scoreboard-team { flex-wrap: wrap; gap: 8px; }
+.host-sidebar .scoreboard-team-name { flex: 1; overflow-wrap: anywhere; }
+.host-sidebar .live-scoreboard-team strong { width: 100%; text-align: right; }
+.host-main { min-width: 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.host-main .question-card-section { padding: 0; gap: 10px; justify-content: flex-start; }
+.host-main .question-card { padding: clamp(16px, 2vh, 28px); max-width: 1100px; animation: none; }
+.host-main .question-text { font-size: clamp(1.1rem, 2.8vh, 2rem); margin-bottom: 16px; }
+.host-main .question-number-badge { margin-bottom: 12px; }
+.host-main .option-item { padding: 12px; font-size: clamp(.9rem, 2vh, 1.2rem); overflow-wrap: anywhere; }
+.host-main .timer-display { font-size: clamp(2rem, 5vh, 3rem); }
+.host-round-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.host-round-actions .next-btn { margin: 0; padding: 10px 18px; }
+.results-overlay { position: fixed; inset: 0; z-index: 1000; background: rgba(15,23,42,.65); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.results-dialog { position: relative; background: var(--bg-card); border-radius: 18px; width: min(100%, 1000px); max-height: calc(100dvh - 40px); overflow: auto; flex: none; padding: 24px; }
+.results-close { align-self: flex-end; cursor: pointer; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); }
+@media (max-width: 700px) {
+  .host-page { padding: 8px; }
+  .host-layout { grid-template-columns: 130px minmax(0, 1fr); gap: 8px; }
+  .host-title { font-size: 1rem; }
+  .host-sidebar .live-scoreboard { padding: 8px; }
+  .host-sidebar .live-scoreboard-team { padding: 8px; }
+  .host-main .options-grid { grid-template-columns: 1fr; }
+  .results-overlay { padding: 8px; }
+  .results-dialog { padding: 12px; max-height: calc(100dvh - 16px); }
+}

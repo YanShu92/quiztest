@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
 import { db } from '@/lib/firebase';
-import { ref, onValue, runTransaction } from 'firebase/database';
+import { ref, onValue, runTransaction, set, get } from 'firebase/database';
 
 import { useServerOffset } from '@/lib/useServerOffset';
 import Scoreboard from '@/components/Scoreboard';
@@ -29,6 +29,9 @@ export default function PlayPage() {
   const [submitting, setSubmitting] = useState(false);
   const timerRef = useRef(null);
 
+  const [connected, setConnected] = useState(false);
+  useEffect(() => onValue(ref(db, '.info/connected'), snap => setConnected(snap.val() === true)), []);
+
   useEffect(() => {
     const slot = localStorage.getItem('quizSlot');
     const name = localStorage.getItem('quizTeamName');
@@ -47,9 +50,21 @@ export default function PlayPage() {
     const unsub = onValue(gameRef, (snap) => {
       const data = snap.val() || {};
       setGameState(data);
-    });
+    }, () => setError("Mất kết nối dữ liệu. Hãy kiểm tra mạng và tải lại trang."));
     return () => unsub();
   }, [router]);
+
+  useEffect(() => {
+    if (gameState?.status !== 'syncing' || !mySlot || offset === null) return;
+    const roundId = gameState.currentQuestion?.roundId;
+    if (!roundId || gameState.ready?.[mySlot] === roundId) return;
+    let cancelled = false;
+    const acknowledge = () => set(ref(db, `quiz/ready/${mySlot}`), roundId)
+      .catch(() => { if (!cancelled) setError('Chưa xác nhận được câu hỏi. Đang thử lại…'); });
+    acknowledge();
+    const retry = setInterval(acknowledge, 2000);
+    return () => { cancelled = true; clearInterval(retry); };
+  }, [gameState?.status, gameState?.currentQuestion?.roundId, gameState?.ready?.[mySlot], mySlot, offset]);
 
   // Timer — only for display purposes
   useEffect(() => {
@@ -91,6 +106,7 @@ export default function PlayPage() {
     setSubmitting(true);
 
     try {
+      await get(ref(db, 'quiz'));
       const result = await runTransaction(ref(db, 'quiz'), data => {
         if (!data || data.status !== 'question' || data.currentQuestion?.startTime !== startTime ||
             data.answers?.[mySlot] || Date.now() + offset >= startTime + TIMER_DURATION * 1000) return;
@@ -193,6 +209,7 @@ export default function PlayPage() {
         <Scoreboard teams={gameState.teams || {}} />
         {/* Body */}
         <div className="team-play-body">
+          {!connected && <p role="alert">Đang mất kết nối Firebase. Hãy kiểm tra mạng để nhận câu hỏi mới.</p>}
           {error && <p role="alert">{error}</p>}
           {/* LOBBY */}
           {status === 'lobby' && (
@@ -213,11 +230,11 @@ export default function PlayPage() {
           )}
 
           {/* QUESTION ACTIVE */}
-          {status === 'question' && cq && (
+          {['syncing', 'question'].includes(status) && cq && (
             <>
               {/* Mini timer */}
               <div className={`mini-timer ${timerClass}`}>
-                ⏱ {Math.ceil(timeLeft)}s
+                ⏱ {status === 'syncing' ? 'Đã nhận câu hỏi · Chờ các đội sẵn sàng' : `${Math.ceil(timeLeft)}s`}
               </div>
 
               {/* Not yet answered, not timed out */}
@@ -232,7 +249,7 @@ export default function PlayPage() {
                         key={letter}
                         className={`answer-btn ${cls}`}
                         onClick={() => handleAnswer(letter)}
-                        disabled={offset === null || !!myAnswer || submitting}
+                        disabled={!connected || status !== 'question' || offset === null || !!myAnswer || submitting}
                       >
                         <div className="answer-btn-letter">{letter}</div>
                         <div className="answer-btn-text">{cq.questionData.options[letter]}</div>
