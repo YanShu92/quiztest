@@ -12,7 +12,6 @@ import {
 } from "firebase/database";
 import questions from "@/lib/questions";
 import { roundReady } from "@/lib/roundReady";
-import { shuffleQuiz } from "@/lib/shuffleQuiz";
 
 import { useServerOffset } from "@/lib/useServerOffset";
 import Scoreboard from "@/components/Scoreboard";
@@ -87,6 +86,38 @@ export default function HostPage() {
   const [revealTriggered, setRevealTriggered] = useState(false);
   const timerRef = useRef(null);
   const revealRef = useRef(false);
+  const audioContextRef = useRef(null);
+  const soundRoundRef = useRef(null);
+
+  const prepareAudio = useCallback(() => {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    if (!audioContextRef.current) audioContextRef.current = new AudioContext();
+    if (audioContextRef.current.state === "suspended") audioContextRef.current.resume();
+  }, []);
+
+  const playTimeUpSound = useCallback((roundId) => {
+    if (!roundId || soundRoundRef.current === roundId) return;
+    soundRoundRef.current = roundId;
+    const context = audioContextRef.current;
+    if (!context || context.state !== "running") return;
+    const start = context.currentTime;
+    [0, 0.22, 0.44].forEach((delay, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "square";
+      oscillator.frequency.value = index === 2 ? 440 : 660;
+      gain.gain.setValueAtTime(0.0001, start + delay);
+      gain.gain.exponentialRampToValueAtTime(0.2, start + delay + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + delay + 0.18);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(start + delay);
+      oscillator.stop(start + delay + 0.19);
+    });
+  }, []);
+
+  useEffect(() => () => audioContextRef.current?.close(), []);
 
   const [connected, setConnected] = useState(false);
   useEffect(() => onValue(ref(db, '.info/connected'), snap => setConnected(snap.val() === true)), []);
@@ -138,6 +169,7 @@ export default function HostPage() {
 
         if (remaining <= 0 && !revealRef.current) {
           revealRef.current = true;
+          playTimeUpSound(gameState.currentQuestion.roundId);
           setRevealTriggered(true);
           triggerReveal(startTime).catch(() => {
             setError("Không thể lưu kết quả. Đang thử lại…");
@@ -155,7 +187,7 @@ export default function HostPage() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [gameState?.status, gameState?.currentQuestion?.startTime, offset]);
+  }, [gameState?.status, gameState?.currentQuestion?.startTime, gameState?.currentQuestion?.roundId, offset, playTimeUpSound]);
 
   const triggerReveal = useCallback(async (startTime) => {
     await get(ref(db, "quiz"));
@@ -251,6 +283,7 @@ export default function HostPage() {
       return;
     setSelecting(true);
     setError("");
+    prepareAudio();
     try {
       const roundId = crypto.randomUUID();
       await get(ref(db, "quiz"));
@@ -269,7 +302,7 @@ export default function HostPage() {
             ready: null,
             currentQuestion: {
               number: qNumber,
-              questionData: (data.questionDeck || questions)[qNumber - 1],
+              questionData: questions[qNumber - 1],
               roundId,
             },
             answers: null,
@@ -290,7 +323,7 @@ export default function HostPage() {
       ? Object.keys(gameState.usedQuestions).length
       : 0;
     if (usedCount >= 10) {
-      await update(ref(db, "quiz"), { status: "finished", questionDeck: shuffleQuiz(questions) });
+      await update(ref(db, "quiz"), { status: "finished", questionDeck: null });
     } else {
       await update(ref(db, "quiz"), {
         status: "picking",
@@ -303,7 +336,7 @@ export default function HostPage() {
   const handleStartGame = async () => {
     await update(ref(db, "quiz"), {
       status: "picking",
-      questionDeck: gameState.questionDeck || shuffleQuiz(questions),
+      questionDeck: null,
       teams: Object.fromEntries(Object.entries(gameState.teams || {}).filter(([, t]) => t).map(([k, t]) => [k, { ...t, score: 0 }])),
       ready: null,
       usedQuestions: null,
